@@ -3,55 +3,75 @@ package etcdv3
 import (
 	"context"
 	"fmt"
-	"net"
+	"github.com/coreos/etcd/clientv3"
+	"log"
 	"strings"
 	"time"
-
-	etcd3 "github.com/coreos/etcd/clientv3"
 )
 
-// Prefix should start and end with no slash
-var Prefix = "etcd3_naming"
-var Deregister = make(chan struct{})
-
-// Register
-func Register(name, host, port string, target string, interval time.Duration, ttl int) error {
-	serviceValue := net.JoinHostPort(host, port)
-	serviceKey := fmt.Sprintf("/%s/%s/%s", Prefix, name, serviceValue)
-
-	// get endpoints for register dial address
+// Register register service with name as prefix to etcd, multi etcd addr should use ; to split
+func Register(etcdAddr, name string, addr string, ttl int64) error {
 	var err error
-	client, err := etcd3.New(etcd3.Config{
-		Endpoints: strings.Split(target, ","),
-	})
-	if err != nil {
-		return fmt.Errorf("grpclb: create etcd3 client failed: %v", err)
-	}
-	resp, err := client.Grant(context.TODO(), int64(ttl))
-	if err != nil {
-		return fmt.Errorf("grpclb: create etcd3 lease failed: %v", err)
+
+	if cli == nil {
+		cli, err = clientv3.New(clientv3.Config{
+			Endpoints:   strings.Split(etcdAddr, ";"),
+			DialTimeout: 15 * time.Second,
+		})
+		if err != nil {
+			return err
+		}
 	}
 
-	if _, err := client.Put(context.TODO(), serviceKey, serviceValue, etcd3.WithLease(resp.ID)); err != nil {
-		return fmt.Errorf("grpclb: set service '%s' with ttl to etcd3 failed: %s", name, err.Error())
-	}
+	ticker := time.NewTicker(time.Second * time.Duration(ttl))
 
-	if _, err := client.KeepAlive(context.TODO(), resp.ID); err != nil {
-		return fmt.Errorf("grpclb: refresh service '%s' with ttl to etcd3 failed: %s", name, err.Error())
-	}
-
-	// wait deregister then delete
 	go func() {
-		<-Deregister
-		client.Delete(context.Background(), serviceKey)
-		Deregister <- struct{}{}
+		for {
+			getResp, err := cli.Get(context.Background(), "/"+schema+"/"+name+"/"+addr)
+			if err != nil {
+				log.Println(err)
+			} else if getResp.Count == 0 {
+				err = withAlive(name, addr, ttl)
+				if err != nil {
+					log.Println(err)
+				}
+			} else {
+				// do nothing
+			}
+
+			<-ticker.C
+		}
 	}()
 
 	return nil
 }
 
-// UnRegister delete registered service from etcd
-func UnRegister() {
-	Deregister <- struct{}{}
-	<-Deregister
+// 自动定时续约租约
+func withAlive(name string, addr string, ttl int64) error {
+	leaseResp, err := cli.Grant(context.Background(), ttl)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("key:%v\n", "/"+schema+"/"+name+"/"+addr)
+	_, err = cli.Put(context.Background(), "/"+schema+"/"+name+"/"+addr, addr, clientv3.WithLease(leaseResp.ID))
+	if err != nil {
+		return err
+	}
+
+	_, err = cli.KeepAlive(context.Background(), leaseResp.ID)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// UnRegister remove service from etcd
+func UnRegister(name string, addr string) {
+	if cli != nil {
+		_, err := cli.Delete(context.Background(), "/"+schema+"/"+name+"/"+addr)
+		if err != nil{
+			fmt.Println(err)
+		}
+	}
 }

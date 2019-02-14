@@ -11,10 +11,9 @@ import (
 	"syscall"
 	"time"
 
+	pb "aranya/grpc-lb/cmd/helloworld"
+	grpclb "aranya/grpc-lb/etcdv3"
 	"google.golang.org/grpc"
-
-	pb "github.com/wwcd/grpc-lb/cmd/helloworld"
-	grpclb "github.com/wwcd/grpc-lb/etcdv3"
 )
 
 var (
@@ -32,25 +31,33 @@ func main() {
 		panic(err)
 	}
 
-	err = grpclb.Register(*serv, *host, *port, *reg, time.Second*10, 15)
+
+	err = grpclb.Register(*reg,*serv,*host+":"+*port,15)
 	if err != nil {
 		panic(err)
 	}
 
+	// 接收退出信号 并注销在etcd的注册信息
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT, syscall.SIGKILL, syscall.SIGHUP, syscall.SIGQUIT)
 	go func() {
 		s := <-ch
 		log.Printf("receive signal '%v'", s)
-		grpclb.UnRegister()
+		grpclb.UnRegister(*serv,*host+":"+*port)
 		os.Exit(1)
 	}()
 
 	log.Printf("starting hello service at %s", *port)
 	s := grpc.NewServer()
+	defer s.GracefulStop()
+
 	pb.RegisterGreeterServer(s, &server{})
-	s.Serve(lis)
+	err = s.Serve(lis)
+	if err != nil{
+		panic(err)
+	}
 }
+
 
 // server is used to implement helloworld.GreeterServer.
 type server struct{}
